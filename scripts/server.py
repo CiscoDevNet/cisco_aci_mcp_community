@@ -62,55 +62,90 @@ class ACIClient:
                     return True
                 else:
                     logger.error(f"Authentication failed: {response.status_code}")
+                    self.session_cookies = None
                     return False
                     
         except Exception as e:
             logger.error(f"Authentication error: {e}")
+            self.session_cookies = None
             return False
-    
+
+    def _send(self, endpoint: str, method: str, query_params: Optional[Dict], payload: Optional[Dict]) -> httpx.Response:
+        """Send a single HTTP request using the current session cookies."""
+        url = f"{self.base_url}{endpoint}"
+        with httpx.Client(verify=False, timeout=30.0, cookies=self.session_cookies) as client:
+            if method.upper() == "GET":
+                return client.get(url, params=query_params)
+            elif method.upper() == "POST":
+                return client.post(url, json=payload, params=query_params)
+            elif method.upper() == "DELETE":
+                return client.delete(url, params=query_params)
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+
     def make_request(self, endpoint: str, method: str = "GET", query_params: Optional[Dict] = None, payload: Optional[Dict] = None) -> Dict[str, Any]:
-        """Make authenticated request to ACI"""
+        """Make authenticated request to ACI.
+
+        The APIC session token expires after a period of inactivity. When that
+        happens the API responds with HTTP 401/403. In that case we transparently
+        re-authenticate once and retry the request so callers do not see stale
+        token failures.
+        """
         try:
-            # Ensure authentication
+            # Ensure we have a session; log in if we have never authenticated.
             if not self.session_cookies:
                 if not self.authenticate():
                     return {"error": "Authentication failed", "status": "error"}
-            
-            url = f"{self.base_url}{endpoint}"
-            
-            with httpx.Client(verify=False, timeout=30.0, cookies=self.session_cookies) as client:
-                if method.upper() == "GET":
-                    response = client.get(url, params=query_params)
-                elif method.upper() == "POST":
-                    response = client.post(url, json=payload, params=query_params)
-                elif method.upper() == "DELETE":
-                    response = client.delete(url, params=query_params)
-                else:
-                    return {"error": f"Unsupported method: {method}", "status": "error"}
-                
-                if response.status_code in [200, 201, 202]:
-                    try:
-                        return {
-                            "endpoint": endpoint,
-                            "method": method,
-                            "data": response.json(),
-                            "status": "success"
-                        }
-                    except:
-                        return {
-                            "endpoint": endpoint,
-                            "method": method,
-                            "data": response.text,
-                            "status": "success"
-                        }
-                else:
+
+            try:
+                response = self._send(endpoint, method, query_params, payload)
+            except ValueError as e:
+                return {"error": str(e), "status": "error"}
+
+            # A 401/403 typically means the cached token has expired. Re-auth
+            # with a fresh login and retry the request exactly once.
+            if response.status_code in (401, 403):
+                logger.info(
+                    "Received HTTP %s (likely expired token); re-authenticating and retrying %s",
+                    response.status_code,
+                    endpoint,
+                )
+                self.session_cookies = None
+                if not self.authenticate():
                     return {
-                        "error": f"HTTP {response.status_code}: {response.text}",
+                        "error": "Re-authentication failed after token expiration",
                         "endpoint": endpoint,
                         "method": method,
-                        "status": "error"
+                        "status": "error",
                     }
-                    
+                try:
+                    response = self._send(endpoint, method, query_params, payload)
+                except ValueError as e:
+                    return {"error": str(e), "status": "error"}
+
+            if response.status_code in [200, 201, 202]:
+                try:
+                    return {
+                        "endpoint": endpoint,
+                        "method": method,
+                        "data": response.json(),
+                        "status": "success"
+                    }
+                except Exception:
+                    return {
+                        "endpoint": endpoint,
+                        "method": method,
+                        "data": response.text,
+                        "status": "success"
+                    }
+            else:
+                return {
+                    "error": f"HTTP {response.status_code}: {response.text}",
+                    "endpoint": endpoint,
+                    "method": method,
+                    "status": "error"
+                }
+
         except Exception as e:
             return {
                 "error": f"Request failed: {str(e)}",
