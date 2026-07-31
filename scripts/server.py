@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 # Copyright 2025 Cisco Systems, Inc. and its affiliates
-# 
-# SPDX-License-Identifier: Apache-2.0 
+#
+# SPDX-License-Identifier: Apache-2.0
 
 """
 ACI MCP Server - Comprehensive Version with 50 Operations (GET and POST)
@@ -27,13 +27,48 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ACIComprehensiveMCPServer")
 
-# Server configuration 
-mcp = FastMCP("ACI Comprehensive MCP - 50 Operations")
-
 # ACI Configuration from environment variables
 APIC_URL = os.getenv("APIC_URL", "")
 USERNAME = os.getenv("USERNAME", "")
 PASSWORD = os.getenv("PASSWORD", "")
+
+# MCP client authentication (bearer token) configuration
+MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()
+MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "").strip()
+
+
+def _build_auth() -> Optional[Any]:
+    """Build an MCP client auth provider.
+
+    When the server runs over HTTP and an MCP_AUTH_TOKEN is configured, clients
+    must present it as a bearer token (Authorization: Bearer <token>). For local
+    stdio transport no network auth is required, so this returns None.
+    """
+    if MCP_TRANSPORT not in ("http", "streamable-http"):
+        return None
+    if not MCP_AUTH_TOKEN:
+        logger.warning(
+            "MCP_AUTH_TOKEN is not set; the HTTP endpoint will be UNAUTHENTICATED."
+        )
+        return None
+
+    # Import lazily so stdio usage does not require the auth extras.
+    from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+
+    verifier = StaticTokenVerifier(
+        tokens={
+            MCP_AUTH_TOKEN: {
+                "client_id": "aci-mcp-client",
+                "scopes": ["aci:read", "aci:write"],
+            }
+        }
+    )
+    logger.info("MCP HTTP endpoint secured with bearer token authentication.")
+    return verifier
+
+
+# Server configuration
+mcp = FastMCP("ACI Comprehensive MCP - 50 Operations", auth=_build_auth())
 
 class ACIClient:
     def __init__(self):
@@ -41,7 +76,7 @@ class ACIClient:
         self.username = USERNAME
         self.password = PASSWORD
         self.session_cookies = None
-        
+
     def authenticate(self) -> bool:
         """Authenticate with APIC and get session cookies"""
         try:
@@ -54,7 +89,7 @@ class ACIClient:
                     }
                 }
             }
-            
+
             with httpx.Client(verify=False, timeout=30.0) as client:
                 response = client.post(login_url, json=payload)
                 if response.status_code == 200:
@@ -63,11 +98,11 @@ class ACIClient:
                 else:
                     logger.error(f"Authentication failed: {response.status_code}")
                     return False
-                    
+
         except Exception as e:
             logger.error(f"Authentication error: {e}")
             return False
-    
+
     def make_request(self, endpoint: str, method: str = "GET", query_params: Optional[Dict] = None, payload: Optional[Dict] = None) -> Dict[str, Any]:
         """Make authenticated request to ACI"""
         try:
@@ -75,9 +110,9 @@ class ACIClient:
             if not self.session_cookies:
                 if not self.authenticate():
                     return {"error": "Authentication failed", "status": "error"}
-            
+
             url = f"{self.base_url}{endpoint}"
-            
+
             with httpx.Client(verify=False, timeout=30.0, cookies=self.session_cookies) as client:
                 if method.upper() == "GET":
                     response = client.get(url, params=query_params)
@@ -87,7 +122,7 @@ class ACIClient:
                     response = client.delete(url, params=query_params)
                 else:
                     return {"error": f"Unsupported method: {method}", "status": "error"}
-                
+
                 if response.status_code in [200, 201, 202]:
                     try:
                         return {
@@ -110,7 +145,7 @@ class ACIClient:
                         "method": method,
                         "status": "error"
                     }
-                    
+
         except Exception as e:
             return {
                 "error": f"Request failed: {str(e)}",
@@ -267,7 +302,7 @@ def aci_vrf_create(tenant_name: str, vrf_name: str, description: str = "") -> Di
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_bridge_domain_create(tenant_name: str, vrf_name: str, bd_name: str, 
+def aci_bridge_domain_create(tenant_name: str, vrf_name: str, bd_name: str,
                            subnet_ip: str = "", description: str = "") -> Dict[str, Any]:
     """Create a new Bridge Domain in ACI"""
     payload = {
@@ -288,7 +323,7 @@ def aci_bridge_domain_create(tenant_name: str, vrf_name: str, bd_name: str,
             ]
         }
     }
-    
+
     # Add subnet if provided
     if subnet_ip:
         subnet_child = {
@@ -301,7 +336,7 @@ def aci_bridge_domain_create(tenant_name: str, vrf_name: str, bd_name: str,
             }
         }
         payload["fvBD"]["children"].append(subnet_child)
-    
+
     endpoint = f"/api/node/mo/uni/tn-{tenant_name}.json"
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
@@ -321,7 +356,7 @@ def aci_application_profile_create(tenant_name: str, app_name: str, description:
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_epg_create(tenant_name: str, app_name: str, epg_name: str, 
+def aci_epg_create(tenant_name: str, app_name: str, epg_name: str,
                   bd_name: str, description: str = "") -> Dict[str, Any]:
     """Create a new Endpoint Group (EPG) in ACI"""
     payload = {
@@ -362,7 +397,7 @@ def aci_contract_create(tenant_name: str, contract_name: str, description: str =
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_contract_subject_create(tenant_name: str, contract_name: str, subject_name: str, 
+def aci_contract_subject_create(tenant_name: str, contract_name: str, subject_name: str,
                               filter_name: str, description: str = "") -> Dict[str, Any]:
     """Create a new Contract Subject in ACI"""
     payload = {
@@ -422,7 +457,7 @@ def aci_filter_entry_create(tenant_name: str, filter_name: str, entry_name: str,
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_epg_contract_provider_bind(tenant_name: str, app_name: str, epg_name: str, 
+def aci_epg_contract_provider_bind(tenant_name: str, app_name: str, epg_name: str,
                                  contract_name: str) -> Dict[str, Any]:
     """Bind EPG as Contract Provider"""
     payload = {
@@ -437,7 +472,7 @@ def aci_epg_contract_provider_bind(tenant_name: str, app_name: str, epg_name: st
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_epg_contract_consumer_bind(tenant_name: str, app_name: str, epg_name: str, 
+def aci_epg_contract_consumer_bind(tenant_name: str, app_name: str, epg_name: str,
                                  contract_name: str) -> Dict[str, Any]:
     """Bind EPG as Contract Consumer"""
     payload = {
@@ -452,18 +487,18 @@ def aci_epg_contract_consumer_bind(tenant_name: str, app_name: str, epg_name: st
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_epg_domain_bind(tenant_name: str, app_name: str, epg_name: str, 
+def aci_epg_domain_bind(tenant_name: str, app_name: str, epg_name: str,
                        domain_name: str, domain_type: str = "phys") -> Dict[str, Any]:
     """Bind EPG to Physical or VMM Domain"""
     if domain_type == "phys":
         rs_type = "fvRsDomAtt"
         dn_prefix = "uni/phys-"
     elif domain_type == "vmm":
-        rs_type = "fvRsDomAtt" 
+        rs_type = "fvRsDomAtt"
         dn_prefix = "uni/vmmp-VMware/dom-"
     else:
         return {"error": "Invalid domain_type. Use 'phys' or 'vmm'", "status": "error"}
-    
+
     payload = {
         rs_type: {
             "attributes": {
@@ -517,7 +552,7 @@ def aci_l3out_create(tenant_name: str, l3out_name: str, vrf_name: str, descripti
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_external_epg_create(tenant_name: str, l3out_name: str, ext_epg_name: str, 
+def aci_external_epg_create(tenant_name: str, l3out_name: str, ext_epg_name: str,
                           subnet: str = "0.0.0.0/0", description: str = "") -> Dict[str, Any]:
     """Create a new External EPG in ACI"""
     payload = {
@@ -543,7 +578,7 @@ def aci_external_epg_create(tenant_name: str, l3out_name: str, ext_epg_name: str
     return aci_client.make_request(endpoint, "POST", payload=payload)
 
 @mcp.tool()
-def aci_subnet_create(tenant_name: str, bd_name: str, subnet_ip: str, 
+def aci_subnet_create(tenant_name: str, bd_name: str, subnet_ip: str,
                      scope: str = "public", description: str = "") -> Dict[str, Any]:
     """Create a new subnet in a Bridge Domain"""
     payload = {
@@ -562,7 +597,7 @@ def aci_subnet_create(tenant_name: str, bd_name: str, subnet_ip: str,
 # ===== ADVANCED CREATE OPERATIONS (8 tools) =====
 
 @mcp.tool()
-def aci_vlan_pool_create(pool_name: str, vlan_start: int, vlan_end: int, 
+def aci_vlan_pool_create(pool_name: str, vlan_start: int, vlan_end: int,
                         allocation_mode: str = "static", description: str = "") -> Dict[str, Any]:
     """Create a new VLAN pool in ACI"""
     payload = {
@@ -615,23 +650,23 @@ def aci_physical_domain_create(domain_name: str, vlan_pool_name: str, descriptio
 def aci_create_3tier_app(tenant_name: str, app_name: str, vrf_name: str = "VRF1") -> Dict[str, Any]:
     """Create a complete 3-tier application (Web, App, DB) with contracts"""
     results = []
-    
+
     # Create VRF
     results.append(aci_vrf_create(tenant_name, vrf_name, "3-Tier VRF"))
-    
+
     # Create Bridge Domains
     results.append(aci_bridge_domain_create(tenant_name, vrf_name, "BD_Web", "10.1.1.1/24"))
     results.append(aci_bridge_domain_create(tenant_name, vrf_name, "BD_App", "10.1.2.1/24"))
     results.append(aci_bridge_domain_create(tenant_name, vrf_name, "BD_DB", "10.1.3.1/24"))
-    
+
     # Create Application Profile
     results.append(aci_application_profile_create(tenant_name, app_name, "3-Tier Application"))
-    
+
     # Create EPGs
     results.append(aci_epg_create(tenant_name, app_name, "Web_EPG", "BD_Web"))
     results.append(aci_epg_create(tenant_name, app_name, "App_EPG", "BD_App"))
     results.append(aci_epg_create(tenant_name, app_name, "DB_EPG", "BD_DB"))
-    
+
     # Create Filters
     results.append(aci_filter_create(tenant_name, "HTTP_Filter"))
     results.append(aci_filter_entry_create(tenant_name, "HTTP_Filter", "HTTP", "tcp", "80"))
@@ -639,7 +674,7 @@ def aci_create_3tier_app(tenant_name: str, app_name: str, vrf_name: str = "VRF1"
     results.append(aci_filter_entry_create(tenant_name, "App_Filter", "App", "tcp", "8080"))
     results.append(aci_filter_create(tenant_name, "DB_Filter"))
     results.append(aci_filter_entry_create(tenant_name, "DB_Filter", "DB", "tcp", "3306"))
-    
+
     # Create Contracts
     results.append(aci_contract_create(tenant_name, "Web_Contract"))
     results.append(aci_contract_subject_create(tenant_name, "Web_Contract", "HTTP_Subject", "HTTP_Filter"))
@@ -647,7 +682,7 @@ def aci_create_3tier_app(tenant_name: str, app_name: str, vrf_name: str = "VRF1"
     results.append(aci_contract_subject_create(tenant_name, "App_Contract", "App_Subject", "App_Filter"))
     results.append(aci_contract_create(tenant_name, "DB_Contract"))
     results.append(aci_contract_subject_create(tenant_name, "DB_Contract", "DB_Subject", "DB_Filter"))
-    
+
     return {
         "message": f"3-Tier application '{app_name}' creation completed",
         "tenant": tenant_name,
@@ -656,41 +691,41 @@ def aci_create_3tier_app(tenant_name: str, app_name: str, vrf_name: str = "VRF1"
     }
 
 @mcp.tool()
-def aci_create_web_app_stack(tenant_name: str, app_name: str, web_subnet: str = "10.1.1.1/24", 
+def aci_create_web_app_stack(tenant_name: str, app_name: str, web_subnet: str = "10.1.1.1/24",
                            app_subnet: str = "10.1.2.1/24") -> Dict[str, Any]:
     """Create a complete web application stack with connectivity"""
     results = []
-    
+
     # Create tenant if needed
     results.append(aci_tenant_create(tenant_name, f"Tenant for {app_name}"))
-    
+
     # Create VRF
     vrf_name = f"{app_name}_VRF"
     results.append(aci_vrf_create(tenant_name, vrf_name, f"VRF for {app_name}"))
-    
+
     # Create Bridge Domains
     results.append(aci_bridge_domain_create(tenant_name, vrf_name, f"{app_name}_Web_BD", web_subnet))
     results.append(aci_bridge_domain_create(tenant_name, vrf_name, f"{app_name}_App_BD", app_subnet))
-    
+
     # Create Application Profile
     results.append(aci_application_profile_create(tenant_name, app_name, f"Application profile for {app_name}"))
-    
+
     # Create EPGs
     results.append(aci_epg_create(tenant_name, app_name, f"{app_name}_Web_EPG", f"{app_name}_Web_BD"))
     results.append(aci_epg_create(tenant_name, app_name, f"{app_name}_App_EPG", f"{app_name}_App_BD"))
-    
+
     # Create Filters and Contracts
     results.append(aci_filter_create(tenant_name, f"{app_name}_Web_Filter"))
     results.append(aci_filter_entry_create(tenant_name, f"{app_name}_Web_Filter", "HTTP", "tcp", "80"))
     results.append(aci_filter_entry_create(tenant_name, f"{app_name}_Web_Filter", "HTTPS", "tcp", "443"))
-    
+
     results.append(aci_contract_create(tenant_name, f"{app_name}_Web_Contract"))
     results.append(aci_contract_subject_create(tenant_name, f"{app_name}_Web_Contract", "Web_Subject", f"{app_name}_Web_Filter"))
-    
+
     # Bind contracts
     results.append(aci_epg_contract_provider_bind(tenant_name, app_name, f"{app_name}_Web_EPG", f"{app_name}_Web_Contract"))
     results.append(aci_epg_contract_consumer_bind(tenant_name, app_name, f"{app_name}_App_EPG", f"{app_name}_Web_Contract"))
-    
+
     return {
         "message": f"Web application stack '{app_name}' creation completed",
         "tenant": tenant_name,
@@ -780,4 +815,14 @@ def aci_get_operations_summary() -> Dict[str, Any]:
     }
 
 if __name__ == "__main__":
-    mcp.run()
+    # Transport is selectable via environment variables so the same server can
+    # run over stdio (default, for local MCP clients) or streamable HTTP.
+    transport = MCP_TRANSPORT
+
+    if transport in ("http", "streamable-http"):
+        host = os.getenv("MCP_HOST", "127.0.0.1")
+        port = int(os.getenv("MCP_PORT", "8000"))
+        logger.info(f"Starting ACI MCP server over HTTP at http://{host}:{port}/mcp")
+        mcp.run(transport="http", host=host, port=port)
+    else:
+        mcp.run()
